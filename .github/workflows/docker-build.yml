@@ -1,4 +1,3 @@
-
 name: Docker Build and Push
 
 on:
@@ -10,7 +9,7 @@ on:
       - '.github/workflows/docker-build.yml'
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
 
 env:
   DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
@@ -102,9 +101,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-    deploy-to-minikube:
+  deploy-to-minikube:
     name: Deploy to Minikube
-    runs-on: ubuntu-latest  # ✅ ubuntu-latest байх ёстой (windows-latest биш)
+    runs-on: ubuntu-latest
     needs: build-and-push
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
@@ -128,13 +127,21 @@ jobs:
 
       - name: Wait for Minikube to be ready
         run: |
-          kubectl wait --for=condition=ready node --all --timeout=120s
+          for i in {1..30}; do
+            if kubectl version --request-timeout=2s &>/dev/null; then
+              echo "Kubernetes API is ready"
+              break
+            fi
+            echo "Waiting for Kubernetes API... ($i/30)"
+            sleep 5
+          done
           kubectl get nodes
 
       - name: Update kubeconfig
         run: |
           mkdir -p $HOME/.kube
           minikube kubectl -- config view --raw > $HOME/.kube/config
+          kubectl config use-context minikube
 
       - name: Update images in deployment files
         run: |
@@ -153,11 +160,13 @@ jobs:
 
       - name: Wait for deployments
         run: |
-          kubectl wait --for=condition=ready pod -l app=backend -n multi-app --timeout=120s || true
-          kubectl wait --for=condition=ready pod -l app=frontend -n multi-app --timeout=120s || true
+          kubectl wait --for=condition=ready pod -l app=postgres -n multi-app --timeout=180s || true
+          kubectl wait --for=condition=ready pod -l app=backend -n multi-app --timeout=180s || true
+          kubectl wait --for=condition=ready pod -l app=frontend -n multi-app --timeout=180s || true
           kubectl get pods -n multi-app
           kubectl get svc -n multi-app
 
       - name: Get service URL
         run: |
           minikube service list
+          echo "Frontend URL: http://localhost:30080"
