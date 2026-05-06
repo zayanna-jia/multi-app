@@ -101,8 +101,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy-to-minikube:
-    name: Deploy to Minikube
+  deploy-to-kind:
+    name: Deploy to Kind (Kubernetes in Docker)
     runs-on: ubuntu-latest
     needs: build-and-push
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -116,32 +116,23 @@ jobs:
         with:
           version: 'latest'
 
-      - name: Setup Minikube
-        uses: medyagh/setup-minikube@latest
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            name: multi-app-cluster
+            nodes:
+            - role: control-plane
+            - role: worker
+            - role: worker
 
-      - name: Start Minikube
+      - name: Check cluster status
         run: |
-          minikube start --driver=docker
-          minikube update-context
           kubectl cluster-info
-
-      - name: Wait for Minikube to be ready
-        run: |
-          for i in {1..30}; do
-            if kubectl version --request-timeout=2s &>/dev/null; then
-              echo "Kubernetes API is ready"
-              break
-            fi
-            echo "Waiting for Kubernetes API... ($i/30)"
-            sleep 5
-          done
           kubectl get nodes
-
-      - name: Update kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          minikube kubectl -- config view --raw > $HOME/.kube/config
-          kubectl config use-context minikube
+          kubectl get pods -n kube-system
 
       - name: Update images in deployment files
         run: |
@@ -160,13 +151,39 @@ jobs:
 
       - name: Wait for deployments
         run: |
+          echo "Waiting for PostgreSQL..."
           kubectl wait --for=condition=ready pod -l app=postgres -n multi-app --timeout=180s || true
+          
+          echo "Waiting for Backend..."
           kubectl wait --for=condition=ready pod -l app=backend -n multi-app --timeout=180s || true
+          
+          echo "Waiting for Frontend..."
           kubectl wait --for=condition=ready pod -l app=frontend -n multi-app --timeout=180s || true
+          
+          echo "All pods:"
           kubectl get pods -n multi-app
+          
+          echo "All services:"
           kubectl get svc -n multi-app
 
-      - name: Get service URL
+      - name: Port forward and test
         run: |
-          minikube service list
-          echo "Frontend URL: http://localhost:30080"
+          # Port forward backend
+          kubectl port-forward -n multi-app service/backend-service 5000:5000 &
+          sleep 5
+          
+          # Test backend
+          curl -s http://localhost:5000/api/health || echo "Backend not ready yet"
+          
+          # Port forward frontend
+          kubectl port-forward -n multi-app service/frontend-service 8080:80 &
+          sleep 5
+          
+          echo "Frontend available at http://localhost:8080"
+
+      - name: Export logs (if needed)
+        if: failure()
+        run: |
+          kubectl describe pods -n multi-app
+          kubectl logs -n multi-app -l app=backend --tail=50
+          kubectl logs -n multi-app -l app=frontend --tail=50
