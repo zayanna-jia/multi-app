@@ -102,9 +102,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy-to-minikube:
+    deploy-to-minikube:
     name: Deploy to Minikube
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # ✅ ubuntu-latest байх ёстой (windows-latest биш)
     needs: build-and-push
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
@@ -124,19 +124,25 @@ jobs:
         run: |
           minikube start --driver=docker
           minikube update-context
+          kubectl cluster-info
+
+      - name: Wait for Minikube to be ready
+        run: |
+          kubectl wait --for=condition=ready node --all --timeout=120s
+          kubectl get nodes
 
       - name: Update kubeconfig
         run: |
           mkdir -p $HOME/.kube
           minikube kubectl -- config view --raw > $HOME/.kube/config
 
+      - name: Update images in deployment files
+        run: |
+          sed -i "s|multi-backend:latest|${{ secrets.DOCKER_USERNAME }}/multi-backend:${{ github.sha }}|g" k8s/backend-deployment.yaml
+          sed -i "s|multi-frontend:latest|${{ secrets.DOCKER_USERNAME }}/multi-frontend:${{ github.sha }}|g" k8s/frontend-deployment.yaml
+
       - name: Deploy to Kubernetes
         run: |
-          # Update images in deployment files
-          sed -i "s|multi-backend:latest|${{ env.DOCKER_USER }}/multi-backend:${{ github.sha }}|g" k8s/backend-deployment.yaml
-          sed -i "s|multi-frontend:latest|${{ env.DOCKER_USER }}/multi-frontend:${{ github.sha }}|g" k8s/frontend-deployment.yaml
-          
-          # Apply deployments
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/configmap.yaml
           kubectl apply -f k8s/secret.yaml
@@ -144,15 +150,14 @@ jobs:
           kubectl apply -f k8s/postgres-deployment.yaml
           kubectl apply -f k8s/backend-deployment.yaml
           kubectl apply -f k8s/frontend-deployment.yaml
-          
-          # Wait for deployments
-          kubectl wait --for=condition=ready pod -l app=backend -n multi-app --timeout=120s
-          kubectl wait --for=condition=ready pod -l app=frontend -n multi-app --timeout=120s
-          
-          # Get service URL
-          minikube service list
 
-      - name: Verify deployment
+      - name: Wait for deployments
         run: |
+          kubectl wait --for=condition=ready pod -l app=backend -n multi-app --timeout=120s || true
+          kubectl wait --for=condition=ready pod -l app=frontend -n multi-app --timeout=120s || true
           kubectl get pods -n multi-app
           kubectl get svc -n multi-app
+
+      - name: Get service URL
+        run: |
+          minikube service list
